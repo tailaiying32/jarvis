@@ -1,0 +1,4 @@
+.claude/
+cmake-build-debug/
+data/
+models/

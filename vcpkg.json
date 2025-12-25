@@ -1,0 +1,20 @@
+{
+  "name" : "jarvis",
+  "version-string" : "1.0.0",
+  "builtin-baseline" : "5d57f5a0a5469a23e005fc79a7c1814ab4fc967e",
+  "dependencies" : [ {
+    "name" : "ggml",
+    "version>=" : "2025-11-17#1",
+    "features" : [ "cuda" ]
+  }, {
+    "name" : "miniaudio",
+    "version>=" : "0.11.23"
+  }, {
+    "name" : "whisper-cpp",
+    "version>=" : "1.8.2",
+    "features" : [ "cuda" ]
+  }, {
+    "name" : "llama-cpp",
+    "version>=" : "7146"
+  } ]
+}
