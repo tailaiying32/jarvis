@@ -43,4 +43,4 @@ private:
     static void dataCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount);
 };
 
-#endif // AUDIO_CAPTURE_H
+#endif
