@@ -6,32 +6,48 @@
 #include <vector>
 #include <functional>
 
-using TokenCallback = std::function<void(const std::string&token)>;
+using TokenCallback = std::function<void(const std::string& token)>;
 
 class TextInference {
 
 public:
-    TextInference(): model_(nullptr), ctx_(nullptr), sampler_(nullptr) {}
+    TextInference()
+        : model_(nullptr),
+          ctx_(nullptr),
+          sampler_(nullptr),
+          im_start_token_(-1),
+          im_end_token_(-1),
+          n_past_(0) {}
+
     ~TextInference() {
         shutdown();
-    };
+    }
 
     bool init(const std::string& model_path, int gpu_layers);
-    std::string generate(const std::string& prompt, int max_tokens, TokenCallback on_token, bool* hit_text_stop = nullptr);
+
+    std::string generate(
+        const std::string& prompt,
+        int max_tokens,
+        TokenCallback on_token,
+        bool* hit_text_stop = nullptr
+    );
+
     void appendToContext(const std::string& text);
     void clearHistory();
     bool isFirstTurn() const { return n_past_ == 0; }
-
-    void llama_batch_add(llama_batch& batch, llama_token id, llama_pos pos, const std::vector<llama_seq_id> & seq_ids, bool logits);
-    void llama_batch_clear(llama_batch & batch);
 
     void shutdown();
 
 private:
     llama_model* model_;
-    struct llama_context *ctx_;
+    llama_context* ctx_;
     llama_sampler* sampler_;
-    int n_past_ = 0;
+
+    // Qwen ChatML control tokens
+    llama_token im_start_token_;
+    llama_token im_end_token_;
+
+    int n_past_;
 };
 
 #endif

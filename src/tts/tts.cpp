@@ -7,17 +7,25 @@
 
 #include "sherpa-onnx/c-api/c-api.h"
 
-bool TextToSpeech::init(const std::string& model_path, const std::string& tokens_path, const std::string& data_dir) {
+bool TextToSpeech::init(const TTSConfig& cfg) {
     SherpaOnnxOfflineTtsConfig config;
     memset(&config, 0, sizeof(config));
 
-    // Piper/VITS model configuration
-    config.model.vits.model    = model_path.c_str();
-    config.model.vits.tokens   = tokens_path.c_str();
-    config.model.vits.data_dir = data_dir.c_str();
-    config.model.vits.length_scale = 1.0f;
-    config.model.num_threads = 4;
+    config.model.num_threads = 6;
     config.model.provider = "cpu";
+
+    if (cfg.engine == TTSEngine::Piper) {
+        config.model.vits.model    = cfg.model_path.c_str();
+        config.model.vits.tokens   = cfg.tokens_path.c_str();
+        config.model.vits.data_dir = cfg.data_dir.c_str();
+        config.model.vits.length_scale = 1.0f;
+    } else {
+        config.model.kokoro.model    = cfg.model_path.c_str();
+        config.model.kokoro.tokens   = cfg.tokens_path.c_str();
+        config.model.kokoro.voices   = cfg.voices_path.c_str();
+        config.model.kokoro.lang     = "en";
+        config.model.kokoro.data_dir = cfg.data_dir.c_str();
+    }
 
     tts_ = SherpaOnnxCreateOfflineTts(&config);
     if (!tts_) {
@@ -73,7 +81,7 @@ void TextToSpeech::speak(const std::string& text, float speed) {
     if (text.empty()) { return; }
 
     // generate audio
-    const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(tts_, text.c_str(), /*sid=*/0, speed);
+    const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(tts_, text.c_str(), /*sid=*/11, speed);
 
     if (!audio || audio->n == 0) {
         std::cerr << "Failed to generate audio\n";
@@ -168,45 +176,155 @@ void TextToSpeech::playAudio(const float* samples, int32_t n, int32_t sample_rat
     ma_device_uninit(&device);
 }
 
+AudioBuffer TextToSpeech::generateAudio(const std::string& text, float speed) {
+    AudioBuffer buf;
+    buf.sample_rate = sample_rate_;
+
+    if (!tts_ || text.empty()) return buf;
+
+    const SherpaOnnxGeneratedAudio* audio = SherpaOnnxOfflineTtsGenerate(tts_, text.c_str(), 11, speed);
+    if (!audio || audio->n == 0) {
+        if (audio) SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+        return buf;
+    }
+
+    buf.sample_rate = audio->sample_rate;
+    buf.samples.resize(audio->n);
+    for (int32_t i = 0; i < audio->n; i++) {
+        float s = audio->samples[i];
+        if (s > 1.0f) s = 1.0f;
+        if (s < -1.0f) s = -1.0f;
+        buf.samples[i] = static_cast<int16_t>(s * 32767.0f);
+    }
+
+    SherpaOnnxDestroyOfflineTtsGeneratedAudio(audio);
+    return buf;
+}
+
+void TextToSpeech::audioCallback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+    (void)pInput;
+    TextToSpeech* tts = static_cast<TextToSpeech*>(pDevice->pUserData);
+    tts->fillAudioBuffer(static_cast<int16_t*>(pOutput), frameCount);
+}
+
+void TextToSpeech::fillAudioBuffer(int16_t* output, ma_uint32 frameCount) {
+    ma_uint32 framesWritten = 0;
+
+    while (framesWritten < frameCount) {
+        // Try to read from current buffer
+        {
+            std::lock_guard<std::mutex> lock(playbackMutex_);
+            size_t pos = playbackPos_.load();
+            size_t available = currentBuffer_.size() - pos;
+
+            if (available > 0) {
+                size_t toCopy = std::min(static_cast<size_t>(frameCount - framesWritten), available);
+                memcpy(output + framesWritten, currentBuffer_.data() + pos, toCopy * sizeof(int16_t));
+                playbackPos_.fetch_add(toCopy);
+                framesWritten += static_cast<ma_uint32>(toCopy);
+                continue;
+            }
+        }
+
+        // Current buffer exhausted, try to get next from queue
+        {
+            std::lock_guard<std::mutex> lock(audioMutex_);
+            if (!audioQueue_.empty()) {
+                std::lock_guard<std::mutex> plock(playbackMutex_);
+                currentBuffer_ = std::move(audioQueue_.front().samples);
+                audioQueue_.pop();
+                playbackPos_.store(0);
+                continue;
+            }
+        }
+
+        // No audio available, fill remaining with silence
+        memset(output + framesWritten, 0, (frameCount - framesWritten) * sizeof(int16_t));
+        break;
+    }
+}
+
 void TextToSpeech::startStreaming() {
-    done_ = false;
+    textDone_ = false;
+    allDone_ = false;
     streaming_ = true;
-    workerThread_ = std::thread(&TextToSpeech::workerLoop, this);
+    currentBuffer_.clear();
+    playbackPos_.store(0);
+
+    // Initialize audio device once
+    ma_device_config deviceConfig = ma_device_config_init(ma_device_type_playback);
+    deviceConfig.playback.format   = ma_format_s16;
+    deviceConfig.playback.channels = 1;
+    deviceConfig.sampleRate        = static_cast<ma_uint32>(sample_rate_);
+    deviceConfig.pUserData         = this;
+    deviceConfig.dataCallback      = audioCallback;
+
+    if (ma_device_init(nullptr, &deviceConfig, &device_) == MA_SUCCESS) {
+        deviceInitialized_ = true;
+        ma_device_start(&device_);
+    }
+
+    // Start generator thread
+    generatorThread_ = std::thread(&TextToSpeech::generatorLoop, this);
 }
 
 void TextToSpeech::queueText(const std::string& text) {
     {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        textQueue_.push(text.c_str());
+        std::lock_guard<std::mutex> lock(textMutex_);
+        textQueue_.push(text);
     }
-    queueCv_.notify_one();
+    textCv_.notify_one();
 }
 
 void TextToSpeech::finishStreaming() {
+    // Signal generator that no more text is coming
     {
-        std::lock_guard<std::mutex> lock(queueMutex_);
-        done_ = true;
+        std::lock_guard<std::mutex> lock(textMutex_);
+        textDone_ = true;
     }
-    queueCv_.notify_one();
+    textCv_.notify_one();
 
-    if (workerThread_.joinable()) {
-        workerThread_.join();
+    // Wait for generator to finish
+    if (generatorThread_.joinable()) {
+        generatorThread_.join();
     }
+
+    // Wait for all audio to be played
+    while (true) {
+        {
+            std::lock_guard<std::mutex> alock(audioMutex_);
+            std::lock_guard<std::mutex> plock(playbackMutex_);
+            if (audioQueue_.empty() && playbackPos_.load() >= currentBuffer_.size()) {
+                break;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // Small delay for final buffer to drain
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    // Stop and cleanup device
+    if (deviceInitialized_) {
+        ma_device_stop(&device_);
+        ma_device_uninit(&device_);
+        deviceInitialized_ = false;
+    }
+
     streaming_ = false;
 }
 
-
-void TextToSpeech::workerLoop() {
+void TextToSpeech::generatorLoop() {
     while (true) {
         std::string text;
         {
-            std::unique_lock<std::mutex> lock(queueMutex_);
-            queueCv_.wait(lock, [this] {
-                return !textQueue_.empty() || done_;
+            std::unique_lock<std::mutex> lock(textMutex_);
+            textCv_.wait(lock, [this] {
+                return !textQueue_.empty() || textDone_;
             });
 
-            if (textQueue_.empty() && done_) {
-                break;  // no more text incoming
+            if (textQueue_.empty() && textDone_) {
+                break;
             }
 
             if (!textQueue_.empty()) {
@@ -216,8 +334,12 @@ void TextToSpeech::workerLoop() {
         }
 
         if (!text.empty()) {
-            // generate and play this chunk
-            speak(text, 1.2);
+            AudioBuffer buf = generateAudio(text, 1.0f);
+
+            if (!buf.samples.empty()) {
+                std::lock_guard<std::mutex> lock(audioMutex_);
+                audioQueue_.push(std::move(buf));
+            }
         }
     }
 }

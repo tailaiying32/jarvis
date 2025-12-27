@@ -53,7 +53,7 @@ std::string Transcribe::transcribe(const std::vector<float> &audio) {
     full_params.single_segment   = false;
     full_params.language         = "en";
     full_params.n_threads        = 8;
-    full_params.vad = true;
+    full_params.vad = false;
     full_params.vad_model_path = "models/silero-v6.2.0-ggml.bin";
 
     // Run inference

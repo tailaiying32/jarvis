@@ -9,6 +9,19 @@
 
 class Transcribe;
 
+struct PiperConfig {
+    std::string model;
+    std::string tokens;
+    std::string data_dir;
+};
+
+struct KokoroConfig {
+    std::string model;
+    std::string tokens;
+    std::string data_dir;
+    std::string voices;
+};
+
 class Assistant {
 
 public:
@@ -17,9 +30,8 @@ public:
 
     bool init(const std::string& whisper_model,
               const std::string& llama_model,
-              const std::string& tts_model,
-              const std::string& tts_tokens,
-              const std::string& tts_data_dir);
+              const PiperConfig& piper,
+              const KokoroConfig& kokoro);
     void run();
     void shutdown();
 
