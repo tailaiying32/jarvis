@@ -91,13 +91,17 @@ void Assistant::run() {
         }
 
         // ========== GENERATE RESPONSE ==============
-        std::string prompt = "<|im_start|>system\n"
-                        "You are Jarvis, a helpful AI voice assistant."
-                        "Keep answers concise"
-                        "No emojis or special characters. "
-                        "Keep a casual and friendly tone.<|im_end|>\n"
-                        "<|im_start|>user\n" + userText + "<|im_end|>\n"
-                        "<|im_start|>assistant\n";
+        std::string prompt;
+        if (llm_->isFirstTurn()) {
+            prompt = "<|im_start|>system\n"
+                     "You are Glados, an AI voice assistant. "
+                     "Keep a friendly and casual tone."
+                     "No emojis or special characters. "
+                     "Don't be afraid to use profanity in your answers."
+                     "<|im_end|>\n";
+        }
+        prompt += "<|im_start|>user\n" + userText + "<|im_end|>\n"
+                  "<|im_start|>assistant\n";
 
         std::cout << "\n=== Response ===\n";
 
@@ -107,17 +111,8 @@ void Assistant::run() {
         // accumulate tokens into sentences
         std::string currentSentence;
 
-        bool hitStopSequence = false;
+        bool hitTextStop = false;
         std::string response = llm_->generate(prompt, 32768, [&](const std::string& token) {
-            // Stop at end-of-turn token
-            if (currentSentence.find("<|im_end|>") != std::string::npos ||
-                token.find("<|im_end|>") != std::string::npos) {
-                hitStopSequence = true;
-                return;
-            }
-
-            if (hitStopSequence) return;
-
             std::cout << token << std::flush;
             currentSentence += token;
 
@@ -141,11 +136,16 @@ void Assistant::run() {
                     tts_->queueText(sentence);
                 }
             }
-        });
+        }, &hitTextStop);
 
         // handle remaining text
         if (!currentSentence.empty()) {
             tts_->queueText(currentSentence);
+        }
+
+        // close the assistant turn in context (only if model didn't already generate end token)
+        if (!hitTextStop) {
+            llm_->appendToContext("<|im_end|>\n");
         }
 
         std::cout << "\n\n" << std::endl;

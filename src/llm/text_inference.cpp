@@ -32,17 +32,18 @@ bool TextInference::init(const std::string &model_path, const int gpu_layers) {
 
     // initialize sampler chain with typical samplers
     sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(20));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.8f, 0));
+    llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.9f, 1));
     llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.7f));
-
-
+    llama_sampler_chain_add(sampler_, llama_sampler_init_penalties(64, 1.1f, 0.0f, 0.0f));
     llama_sampler_chain_add(sampler_, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     return true;
 }
 
-std::string TextInference::generate(const std::string& prompt, int max_tokens, TokenCallback on_token) {
+std::string TextInference::generate(const std::string& prompt, int max_tokens, TokenCallback on_token, bool* hit_text_stop) {
+    if (hit_text_stop) *hit_text_stop = false;
+
     // tokenize prompt (don't add BOS if continuing conversation)
     const llama_vocab* vocab = llama_model_get_vocab(model_);
     std::vector<llama_token> tokens_list(prompt.size() + 1);
@@ -58,6 +59,8 @@ std::string TextInference::generate(const std::string& prompt, int max_tokens, T
     n_past_ += n_tokens;
 
     std::string result;
+    std::string buffer;  // buffer to detect stop sequences before streaming
+    const size_t BUFFER_SIZE = 12;  // length of "<|im_start|>"
     llama_token eos_token = llama_vocab_eos(vocab);
     llama_token eot_token = llama_vocab_eot(vocab);
 
@@ -79,17 +82,33 @@ std::string TextInference::generate(const std::string& prompt, int max_tokens, T
         int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
         std::string piece(buf, n);
 
-        // check for ChatML end-of-turn marker in text (fallback for models where eot_token doesn't match)
-        if (piece.find("<|im_end|>") != std::string::npos ||
-            piece.find("<|im_start|>") != std::string::npos) {
+        buffer.append(piece);
+
+        // check for ChatML markers in buffer
+        size_t stop_pos = buffer.find("<|im_end|>");
+        if (stop_pos == std::string::npos) {
+            stop_pos = buffer.find("<|im_start|>");
+        }
+        if (stop_pos != std::string::npos) {
+            // emit everything before the stop marker
+            if (stop_pos > 0 && on_token) {
+                on_token(buffer.substr(0, stop_pos));
+            }
+            result.append(buffer.substr(0, stop_pos));
+            if (hit_text_stop) *hit_text_stop = true;
             break;
         }
 
-        if (on_token) {
-            on_token(piece);
+        // emit safe content (keep BUFFER_SIZE chars in case stop sequence is split)
+        if (buffer.size() > BUFFER_SIZE) {
+            size_t safe_len = buffer.size() - BUFFER_SIZE;
+            std::string safe_content = buffer.substr(0, safe_len);
+            if (on_token) {
+                on_token(safe_content);
+            }
+            result.append(safe_content);
+            buffer = buffer.substr(safe_len);
         }
-
-        result.append(piece);
 
         // prepare batch for next token
         llama_batch_clear(batch);
@@ -97,12 +116,33 @@ std::string TextInference::generate(const std::string& prompt, int max_tokens, T
         n_past_++;
     }
 
+    // emit any remaining buffered content (no stop sequence found)
+    if (!buffer.empty() && on_token) {
+        on_token(buffer);
+    }
+    result.append(buffer);
+
     llama_batch_free(batch);
     return result;
 }
 
+void TextInference::appendToContext(const std::string& text) {
+    const llama_vocab* vocab = llama_model_get_vocab(model_);
+    std::vector<llama_token> tokens(text.size() + 1);
+    int n_tokens = llama_tokenize(vocab, text.c_str(), text.size(), tokens.data(), tokens.size(), false, false);
+    tokens.resize(n_tokens);
+
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    for (int i = 0; i < n_tokens; i++) {
+        llama_batch_add(batch, tokens[i], n_past_ + i, { 0 }, false);
+    }
+    llama_decode(ctx_, batch);
+    n_past_ += n_tokens;
+    llama_batch_free(batch);
+}
+
 void TextInference::clearHistory() {
-    // llama_kv_cache_seq_rm(ctx_, 0, 0, -1);
+    llama_memory_clear(llama_get_memory(ctx_), true);
     n_past_ = 0;
 }
 

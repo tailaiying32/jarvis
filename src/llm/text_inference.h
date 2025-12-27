@@ -17,8 +17,10 @@ public:
     };
 
     bool init(const std::string& model_path, int gpu_layers);
-    std::string generate(const std::string& prompt, int max_tokens, TokenCallback on_token);
+    std::string generate(const std::string& prompt, int max_tokens, TokenCallback on_token, bool* hit_text_stop = nullptr);
+    void appendToContext(const std::string& text);
     void clearHistory();
+    bool isFirstTurn() const { return n_past_ == 0; }
 
     void llama_batch_add(llama_batch& batch, llama_token id, llama_pos pos, const std::vector<llama_seq_id> & seq_ids, bool logits);
     void llama_batch_clear(llama_batch & batch);
