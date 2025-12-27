@@ -5,7 +5,6 @@
 bool Assistant::init(const std::string& whisper_model,
                      const std::string& llama_model,
                      const std::string& tts_model,
-                     const std::string& tts_voices,
                      const std::string& tts_tokens,
                      const std::string& tts_data_dir) {
     audio_ = new AudioCapture();
@@ -26,7 +25,7 @@ bool Assistant::init(const std::string& whisper_model,
     }
 
     // Initialize TTS
-    if (!tts_->init(tts_model, tts_voices, tts_tokens, tts_data_dir)) {
+    if (!tts_->init(tts_model, tts_tokens, tts_data_dir)) {
         std::cerr << "Failed to initialize TTS\n";
         return false;
     }
@@ -92,17 +91,67 @@ void Assistant::run() {
         }
 
         // ========== GENERATE RESPONSE ==============
-        // only send new content
-        std::string prompt = "User: " + userText + "\nAssistant:";
+        std::string prompt = "<|im_start|>system\n"
+                        "You are Jarvis, a helpful AI voice assistant."
+                        "Keep answers concise"
+                        "No emojis or special characters. "
+                        "Keep a casual and friendly tone.<|im_end|>\n"
+                        "<|im_start|>user\n" + userText + "<|im_end|>\n"
+                        "<|im_start|>assistant\n";
 
         std::cout << "\n=== Response ===\n";
-        std::string response = llm_->generate(prompt, 1024, [](const std::string& token) {
-            std::cout << token << std::flush;
-        });
-        std::cout << "\n\n";
 
-        // ========== SPEAK RESPONSE ==============
-        tts_->speak(response, 1.0);
+        // start TTS streaming
+        tts_->startStreaming();
+
+        // accumulate tokens into sentences
+        std::string currentSentence;
+
+        bool hitStopSequence = false;
+        std::string response = llm_->generate(prompt, 32768, [&](const std::string& token) {
+            // Stop at end-of-turn token
+            if (currentSentence.find("<|im_end|>") != std::string::npos ||
+                token.find("<|im_end|>") != std::string::npos) {
+                hitStopSequence = true;
+                return;
+            }
+
+            if (hitStopSequence) return;
+
+            std::cout << token << std::flush;
+            currentSentence += token;
+
+            // check for sentence boundaries
+            size_t pos;
+            while ((pos = currentSentence.find_first_of(".!?")) != std::string::npos) {
+                // include punctuation
+                std::string sentence = currentSentence.substr(0, pos + 1);
+                currentSentence = currentSentence.substr(pos + 1);
+
+                // trim leading whitespace
+                size_t start = currentSentence.find_first_not_of(" \t\n");
+                if (start != std::string::npos) {
+                    currentSentence = currentSentence.substr(start);
+                } else {
+                    currentSentence.clear();
+                }
+
+                // queue the sentence for TTS
+                if (!sentence.empty()) {
+                    tts_->queueText(sentence);
+                }
+            }
+        });
+
+        // handle remaining text
+        if (!currentSentence.empty()) {
+            tts_->queueText(currentSentence);
+        }
+
+        std::cout << "\n\n" << std::endl;
+
+        // wait for all audio to finish playing
+        tts_->finishStreaming();
     }
 }
 

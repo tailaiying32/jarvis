@@ -32,9 +32,11 @@ bool TextInference::init(const std::string &model_path, const int gpu_layers) {
 
     // initialize sampler chain with typical samplers
     sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.9f, 1));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(sampler_, llama_sampler_init_top_k(20));
+    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(0.8f, 0));
+    llama_sampler_chain_add(sampler_, llama_sampler_init_temp(0.7f));
+
+
     llama_sampler_chain_add(sampler_, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     return true;
@@ -57,6 +59,7 @@ std::string TextInference::generate(const std::string& prompt, int max_tokens, T
 
     std::string result;
     llama_token eos_token = llama_vocab_eos(vocab);
+    llama_token eot_token = llama_vocab_eot(vocab);
 
     for (int i = 0; i < max_tokens; i++) {
         // evaluate the batch
@@ -68,18 +71,25 @@ std::string TextInference::generate(const std::string& prompt, int max_tokens, T
         // sample next token
         llama_token new_token = llama_sampler_sample(sampler_, ctx_, -1);
 
-        // check for eos
-        if (new_token == eos_token) break;
+        // check for eos or eot (end-of-turn, used by ChatML models like Qwen)
+        if (new_token == eos_token || new_token == eot_token) break;
 
         // convert output to string
         char buf[128];
         int n = llama_token_to_piece(vocab, new_token, buf, sizeof(buf), 0, true);
+        std::string piece(buf, n);
 
-        if (on_token) {
-            on_token(std::string(buf, n));
+        // check for ChatML end-of-turn marker in text (fallback for models where eot_token doesn't match)
+        if (piece.find("<|im_end|>") != std::string::npos ||
+            piece.find("<|im_start|>") != std::string::npos) {
+            break;
         }
 
-        result.append(buf, n);
+        if (on_token) {
+            on_token(piece);
+        }
+
+        result.append(piece);
 
         // prepare batch for next token
         llama_batch_clear(batch);

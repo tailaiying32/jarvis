@@ -18,7 +18,6 @@ public:
     bool init(const std::string& whisper_model,
               const std::string& llama_model,
               const std::string& tts_model,
-              const std::string& tts_voices,
               const std::string& tts_tokens,
               const std::string& tts_data_dir);
     void run();

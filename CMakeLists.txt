@@ -47,5 +47,6 @@ add_custom_command(TARGET jarvis POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${SHERPA_ONNX_BUILD_DIR}/bin/Release/sherpa-onnx-c-api.dll"
         "${SHERPA_ONNX_BUILD_DIR}/bin/Release/onnxruntime.dll"
+#        "${SHERPA_ONNX_BUILD_DIR}/_deps/onnxruntime-src/lib/onnxruntime_providers_shared.dll"
         $<TARGET_FILE_DIR:jarvis>
 )

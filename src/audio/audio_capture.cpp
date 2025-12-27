@@ -46,7 +46,6 @@ bool AudioCapture::start() {
 	}
 
 	isRunning = true;
-	std::cout << "Audio capture started.\n" << std::endl;
 	return true;
 }
 

@@ -9,13 +9,12 @@ int main() {
     const std::string whisper_model = "models/ggml-large-v3-turbo-q8_0.bin";
     const std::string llama_model   = "models/Qwen3-VL-4B-Instruct-Q4_1.gguf";
 
-    // TTS model paths (Kokoro)
-    const std::string tts_model    = "models/kokoro-int8-multi-lang-v1_1/model.int8.onnx";
-    const std::string tts_voices   = "models/kokoro-int8-multi-lang-v1_1/voices.bin";
-    const std::string tts_tokens   = "models/kokoro-int8-multi-lang-v1_1/tokens.txt";
-    const std::string tts_data_dir = "models/kokoro-int8-multi-lang-v1_1/espeak-ng-data";
+    // TTS model paths (Piper)
+    const std::string tts_model    = "models/vits-piper-en_US-glados/en_US-glados.onnx";
+    const std::string tts_tokens   = "models/vits-piper-en_US-glados/tokens.txt";
+    const std::string tts_data_dir = "models/vits-piper-en_US-glados/espeak-ng-data";
 
-    if (!jarvis.init(whisper_model, llama_model, tts_model, tts_voices, tts_tokens, tts_data_dir)) {
+    if (!jarvis.init(whisper_model, llama_model, tts_model, tts_tokens, tts_data_dir)) {
         return 1;
     }
 

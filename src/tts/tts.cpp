@@ -5,19 +5,19 @@
 #include <thread>
 #include <chrono>
 
-bool TextToSpeech::init(const std::string& model_path, const std::string& voices_path, const std::string& tokens_path, const std::string& data_dir) {
+#include "sherpa-onnx/c-api/c-api.h"
+
+bool TextToSpeech::init(const std::string& model_path, const std::string& tokens_path, const std::string& data_dir) {
     SherpaOnnxOfflineTtsConfig config;
     memset(&config, 0, sizeof(config));
 
-    // Kokoro model configuration
-    config.model.kokoro.model    = model_path.c_str();
-    config.model.kokoro.voices   = voices_path.c_str();
-    config.model.kokoro.tokens   = tokens_path.c_str();
-    config.model.kokoro.data_dir = data_dir.c_str();
-    config.model.kokoro.length_scale = 1.0f;
-    config.model.kokoro.lang = "en";
-    config.model.num_threads = 8;
-    config.model.provider      = "cpu";
+    // Piper/VITS model configuration
+    config.model.vits.model    = model_path.c_str();
+    config.model.vits.tokens   = tokens_path.c_str();
+    config.model.vits.data_dir = data_dir.c_str();
+    config.model.vits.length_scale = 1.0f;
+    config.model.num_threads = 4;
+    config.model.provider = "cpu";
 
     tts_ = SherpaOnnxCreateOfflineTts(&config);
     if (!tts_) {
@@ -26,10 +26,40 @@ bool TextToSpeech::init(const std::string& model_path, const std::string& voices
     }
 
     sample_rate_ = SherpaOnnxOfflineTtsSampleRate(tts_);
-    std::cout << "TTS initialized. Sample rate: " << sample_rate_ << " Hz\n";
-
     return true;
 }
+
+
+// helper function to clean response of emojis and non-valid characters
+static std::string sanitizeForTTS(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ) {
+        unsigned char c = text[i];
+        if (c < 0x80) {
+            result += c;
+            ++i;
+        }
+        else if ((c & 0xE0) == 0xC0) {
+            if (i + 1 < text.size()) {
+                result += text.substr(i, 2);
+            }
+            i += 2;
+        }
+        else if ((c & 0xF0) == 0xE0) {
+            i += 3;
+        }
+        else if ((c & 0xF8) == 0xF0) {
+            i += 4;
+        }
+        else {
+            ++i;
+        }
+    }
+
+    return result;
+}
+
 
 void TextToSpeech::speak(const std::string& text, float speed) {
     if (!tts_) {
@@ -37,6 +67,8 @@ void TextToSpeech::speak(const std::string& text, float speed) {
         return;
     }
 
+    // Sanitize text - remove emojis and problematic unicode
+    std::string cleanText = sanitizeForTTS(text);
     // if the text is empty, just return
     if (text.empty()) { return; }
 
@@ -134,6 +166,60 @@ void TextToSpeech::playAudio(const float* samples, int32_t n, int32_t sample_rat
 
     ma_device_stop(&device);
     ma_device_uninit(&device);
+}
+
+void TextToSpeech::startStreaming() {
+    done_ = false;
+    streaming_ = true;
+    workerThread_ = std::thread(&TextToSpeech::workerLoop, this);
+}
+
+void TextToSpeech::queueText(const std::string& text) {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        textQueue_.push(text.c_str());
+    }
+    queueCv_.notify_one();
+}
+
+void TextToSpeech::finishStreaming() {
+    {
+        std::lock_guard<std::mutex> lock(queueMutex_);
+        done_ = true;
+    }
+    queueCv_.notify_one();
+
+    if (workerThread_.joinable()) {
+        workerThread_.join();
+    }
+    streaming_ = false;
+}
+
+
+void TextToSpeech::workerLoop() {
+    while (true) {
+        std::string text;
+        {
+            std::unique_lock<std::mutex> lock(queueMutex_);
+            queueCv_.wait(lock, [this] {
+                return !textQueue_.empty() || done_;
+            });
+
+            if (textQueue_.empty() && done_) {
+                break;  // no more text incoming
+            }
+
+            if (!textQueue_.empty()) {
+                text = textQueue_.front();
+                textQueue_.pop();
+            }
+        }
+
+        if (!text.empty()) {
+            // generate and play this chunk
+            speak(text, 1.2);
+        }
+    }
 }
 
 void TextToSpeech::shutdown() {
